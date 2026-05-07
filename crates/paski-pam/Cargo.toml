@@ -1,0 +1,18 @@
+[package]
+name = "paski-pam"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pam_paski"
+crate-type = ["cdylib"]
+
+[dependencies]
+paski-lib = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# pam crate only available on Linux
+[target.'cfg(target_os = "linux")'.dependencies]
+pam = "0.8"

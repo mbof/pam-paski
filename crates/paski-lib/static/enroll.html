@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>pam-paski — Enroll Passkey</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e4e4e7;
+            --text-dim: #9ca3af;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --success: #22c55e;
+            --error: #ef4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 460px;
+            width: 100%;
+            margin: 20px;
+        }
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+            margin-bottom: 32px;
+            line-height: 1.5;
+        }
+        label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 1rem;
+            margin-bottom: 16px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input[type="text"]:focus {
+            border-color: var(--accent);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        button:hover { background: var(--accent-hover); }
+        button:active { transform: scale(0.98); }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            display: none;
+        }
+        .status.success {
+            display: block;
+            background: rgba(34, 197, 94, 0.1);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            color: var(--success);
+        }
+        .status.error {
+            display: block;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: var(--error);
+        }
+        .status.info {
+            display: block;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            color: var(--accent-hover);
+        }
+        .logo {
+            font-size: 2rem;
+            margin-bottom: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="logo">🔑</div>
+        <h1>Enroll a Passkey</h1>
+        <p class="subtitle">
+            Create a passkey for passwordless login to this machine.
+            You'll be prompted by your browser or device to create the credential.
+        </p>
+
+        <label for="passkey-name">Passkey name</label>
+        <input type="text" id="passkey-name" placeholder="e.g. iPhone, YubiKey, Chrome" />
+
+        <button id="enroll-btn" onclick="startEnrollment()">
+            Create Passkey
+        </button>
+
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        async function startEnrollment() {
+            const btn = document.getElementById('enroll-btn');
+            const status = document.getElementById('status');
+
+            // Extract the session token from the URL query parameters
+            const urlParams = new URLSearchParams(window.location.search);
+            const token = urlParams.get('token');
+            if (!token) {
+                showStatus('error', 'Missing enrollment token in URL. Please run "pam-paski enroll" in your terminal to get a valid link.');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Working…';
+            showStatus('info', 'Starting enrollment…');
+
+            try {
+                // Step 1: Start registration using the token
+                const startResp = await fetch('/api/register/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_token: token }),
+                });
+
+                if (!startResp.ok) {
+                    const err = await startResp.json();
+                    throw new Error(err.message || 'Failed to start registration');
+                }
+
+                const { options } = await startResp.json();
+
+                showStatus('info', 'Waiting for your passkey…');
+
+                // Step 2: Call the WebAuthn API
+                const publicKeyOptions = prepareCreationOptions(options);
+                const credential = await navigator.credentials.create({
+                    publicKey: publicKeyOptions,
+                });
+
+                showStatus('info', 'Verifying with server…');
+
+                // Step 3: Send the credential to the server to finish registration
+                const finishResp = await fetch('/api/register/finish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_token: token,
+                        credential: serializeCredential(credential),
+                    }),
+                });
+
+                if (!finishResp.ok) {
+                    const err = await finishResp.json();
+                    throw new Error(err.message || 'Registration failed');
+                }
+
+                const result = await finishResp.json();
+                showStatus('success', '✓ ' + result.message + '. You can close this page.');
+                btn.textContent = 'Done';
+
+            } catch (err) {
+                if (err.name === 'NotAllowedError') {
+                    showStatus('error', 'Passkey creation was cancelled or timed out.');
+                } else if (err.name === 'SecurityError') {
+                    showStatus('error', 'Security error — is the page served over HTTPS with a trusted certificate?');
+                } else {
+                    showStatus('error', 'Error: ' + err.message);
+                }
+                btn.disabled = false;
+                btn.textContent = 'Create Passkey';
+            }
+        }
+
+        function showStatus(type, message) {
+            const el = document.getElementById('status');
+            el.className = 'status ' + type;
+            el.textContent = message;
+        }
+
+        // Convert the server's CreationChallengeResponse into the format
+        // navigator.credentials.create() expects.
+        // webauthn-rs returns JSON-serializable objects, but the WebAuthn API
+        // expects ArrayBuffers for binary fields.
+        function prepareCreationOptions(options) {
+            const publicKey = options.publicKey;
+            publicKey.challenge = base64urlToBuffer(publicKey.challenge);
+            publicKey.user.id = base64urlToBuffer(publicKey.user.id);
+            if (publicKey.excludeCredentials) {
+                publicKey.excludeCredentials = publicKey.excludeCredentials.map(c => ({
+                    ...c,
+                    id: base64urlToBuffer(c.id),
+                }));
+            }
+            return publicKey;
+        }
+
+        // Serialize a PublicKeyCredential for sending back to the server.
+        function serializeCredential(cred) {
+            return {
+                id: cred.id,
+                rawId: bufferToBase64url(cred.rawId),
+                type: cred.type,
+                response: {
+                    attestationObject: bufferToBase64url(cred.response.attestationObject),
+                    clientDataJSON: bufferToBase64url(cred.response.clientDataJSON),
+                },
+                extensions: cred.getClientExtensionResults?.() || {},
+            };
+        }
+
+        function base64urlToBuffer(base64url) {
+            const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+            const pad = base64.length % 4;
+            const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+            const binary = atob(padded);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        function bufferToBase64url(buffer) {
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (const byte of bytes) {
+                binary += String.fromCharCode(byte);
+            }
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+    </script>
+</body>
+</html>
