@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/f4fcc89a-2f82-419e-b16d-65f3bc36e8cd
    which intercepts login attempts and communicates with the daemon to trigger
    WebAuthn flows.
 
-[Learn more about the integration design](design.md).
+[Learn more about the integration design](docs/design.md).
 
 ## Prerequisites
 
