@@ -6,6 +6,10 @@ ceremonies with the standard Linux PAM authentication stack. It includes an
 experimental integration allowing passkey-based authentication to **Cockpit**
 (not supported by the Cockpit team).
 
+Demo video:
+
+https://github.com/user-attachments/assets/f4fcc89a-2f82-419e-b16d-65f3bc36e8cd
+
 ## Architecture
 
 1. **`pam-paskid` (Daemon)**: Runs as root and handles the WebAuthn cryptography
