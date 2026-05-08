@@ -2,17 +2,20 @@
 name = "paski-pam"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
-name = "pam_paski"
 crate-type = ["cdylib"]
+name = "pam_paski"
 
 [dependencies]
-paski-lib = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-
-# pam crate only available on Linux
-[target.'cfg(target_os = "linux")'.dependencies]
-pam = "0.8"
+pamsm = { version = "0.5.5", features = ["libpam"] }
+paski-lib = { path = "../paski-lib" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+webauthn-rs.workspace = true

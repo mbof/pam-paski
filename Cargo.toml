@@ -3,8 +3,7 @@ resolver = "2"
 members = [
     "crates/paski-lib",
     "crates/paski-cli",
-    # paski-pam only builds on Linux (requires PAM headers)
-    # Uncomment on Linux: "crates/paski-pam",
+    "crates/paski-pam",
 ]
 
 [workspace.package]

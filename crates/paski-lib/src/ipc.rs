@@ -14,7 +14,7 @@ pub enum IpcResponse {
     /// The URL the user should open in their browser.
     EnrollUrl { url: String },
     /// Enrollment was successful, here is the resulting credential.
-    EnrollSuccess { passkey: Passkey },
+    EnrollSuccess { passkey: Passkey, name: String },
     /// An error occurred during the process.
     Error { message: String },
 }

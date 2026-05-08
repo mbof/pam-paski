@@ -27,8 +27,7 @@ pub struct CredentialStore {
 impl CredentialStore {
     /// Get the default credential store path for the current user.
     pub fn default_path() -> Result<PathBuf> {
-        let home = std::env::var("HOME")
-            .context("HOME environment variable not set")?;
+        let home = std::env::var("HOME").context("HOME environment variable not set")?;
         Ok(PathBuf::from(home)
             .join(".config")
             .join("pam-paski")
@@ -58,21 +57,40 @@ impl CredentialStore {
 
     /// Save the credential store to a JSON file.
     /// Creates parent directories if they don't exist.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&self, path: &Path, owner: Option<(u32, u32)>) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+                    if let Some((uid, gid)) = owner {
+                        if let Err(e) = std::os::unix::fs::chown(parent, Some(uid), Some(gid)) {
+                            tracing::warn!("Failed to chown credential directory: {}", e);
+                        }
+                    }
+                }
+            }
         }
-        let contents = serde_json::to_string_pretty(self)
-            .context("Failed to serialize credentials")?;
-        std::fs::write(path, &contents)
-            .with_context(|| format!("Failed to write credentials to {}", path.display()))?;
-        // Restrict permissions to owner only
+
+        let file = std::fs::File::create(path)?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         }
+
+        serde_json::to_writer_pretty(file, self)?;
+
+        #[cfg(unix)]
+        if let Some((uid, gid)) = owner {
+            if let Err(e) = std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
+                tracing::warn!("Failed to chown credential file: {}", e);
+            }
+        }
+
         Ok(())
     }
 
@@ -85,7 +103,13 @@ impl CredentialStore {
     /// Save to the default path for the current user.
     pub fn save_default(&self) -> Result<()> {
         let path = Self::default_path()?;
-        self.save(&path)
+        self.save(&path, None)
+    }
+
+    /// Save to the default path for the current user.
+    pub fn init_default(&self) -> Result<()> {
+        let path = Self::default_path()?;
+        self.save(&path, None)
     }
 
     /// Add a new passkey to the store.

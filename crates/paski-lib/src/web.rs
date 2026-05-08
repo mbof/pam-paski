@@ -3,62 +3,42 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Json,
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::{get, post},
-    Router,
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use webauthn_rs::prelude::*;
 
 use crate::config::Config;
-use crate::credentials::{CredentialStore, EnrolledPasskey};
-
-/// Helper to find a user's home directory on Linux
-fn get_user_home(username: &str) -> Result<std::path::PathBuf> {
-    // Basic validation to prevent command injection just in case
-    if !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        anyhow::bail!("Invalid username format");
-    }
-
-    let output = std::process::Command::new("getent")
-        .args(["passwd", username])
-        .output()?;
-        
-    let out_str = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = out_str.split(':').collect();
-    
-    if parts.len() >= 6 {
-        Ok(std::path::PathBuf::from(parts[5]))
-    } else {
-        anyhow::bail!("User not found")
-    }
-}
+use crate::credentials::CredentialStore;
+use crate::utils::get_user_info;
 
 pub struct EnrollmentSession {
     pub username: String,
-    /// Channel to send the completed Passkey back to the waiting CLI IPC connection.
+    /// Channel to send the completed Passkey and its name back to the waiting CLI IPC connection.
     /// It's wrapped in an Option so we can take() it out when sending.
-    pub completion_tx: Option<oneshot::Sender<Passkey>>,
+    pub completion_tx: Option<oneshot::Sender<(Passkey, String)>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Shared state for the web server.
 pub struct AppState {
     pub webauthn: Arc<Webauthn>,
     pub config: Config,
-    
+
     /// Active enrollment sessions initiated by the CLI over IPC, keyed by session token.
     pub enrollment_sessions: Mutex<HashMap<String, EnrollmentSession>>,
-    
+
     /// In-flight registration challenges, keyed by a session token.
     pub reg_challenges: Mutex<HashMap<String, PasskeyRegistration>>,
-    
+
     /// In-flight authentication challenges, keyed by a session token.
     pub auth_challenges: Mutex<HashMap<String, PasskeyAuthentication>>,
-    
+
     /// Path to the credential store file (used for standalone auth testing).
     pub credential_store_path: std::path::PathBuf,
 }
@@ -103,10 +83,17 @@ async fn register_start(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, AppError> {
-    let sessions = state.enrollment_sessions.lock().await;
-    let session = sessions
-        .get(&req.session_token)
-        .ok_or_else(|| anyhow::anyhow!("Invalid or expired session token. Please run pam-paski enroll again."))?;
+    let mut sessions = state.enrollment_sessions.lock().await;
+    let session = sessions.get(&req.session_token).ok_or_else(|| {
+        anyhow::anyhow!("Invalid or expired session token. Please run pam-paski enroll again.")
+    })?;
+
+    if chrono::Utc::now().signed_duration_since(session.created_at) > chrono::Duration::minutes(5) {
+        sessions.remove(&req.session_token);
+        return Err(
+            anyhow::anyhow!("Session token expired. Please run pam-paski enroll again.").into(),
+        );
+    }
 
     let user_unique_id = uuid::Uuid::new_v4();
 
@@ -129,6 +116,7 @@ async fn register_start(
 #[derive(Deserialize)]
 struct RegisterFinishRequest {
     session_token: String,
+    name: String,
     credential: RegisterPublicKeyCredential,
 }
 
@@ -142,10 +130,8 @@ async fn register_finish(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterFinishRequest>,
 ) -> Result<Json<RegisterFinishResponse>, AppError> {
-    let reg_state = state
-        .reg_challenges
-        .lock()
-        .await
+    let mut reg_challenges = state.reg_challenges.lock().await;
+    let reg_state = reg_challenges
         .remove(&req.session_token)
         .ok_or_else(|| anyhow::anyhow!("Invalid or expired registration challenge"))?;
 
@@ -157,12 +143,24 @@ async fn register_finish(
     // Send the completed passkey back to the IPC connection
     let mut sessions = state.enrollment_sessions.lock().await;
     if let Some(session) = sessions.get_mut(&req.session_token) {
+        if chrono::Utc::now().signed_duration_since(session.created_at)
+            > chrono::Duration::minutes(5)
+        {
+            sessions.remove(&req.session_token);
+            return Err(anyhow::anyhow!(
+                "Session token expired. Please run pam-paski enroll again."
+            )
+            .into());
+        }
         if let Some(tx) = session.completion_tx.take() {
-            let _ = tx.send(passkey);
-            tracing::info!("Passkey verified and sent to IPC client for session {}", req.session_token);
+            let _ = tx.send((passkey, req.name.clone()));
+            tracing::info!(
+                "Passkey verified and sent to IPC client for session {}",
+                req.session_token
+            );
         }
     }
-    
+
     // Clean up the session
     sessions.remove(&req.session_token);
 
@@ -195,10 +193,10 @@ async fn authenticate_start(
 ) -> Result<Json<AuthenticateStartResponse>, AppError> {
     // Find the user's home directory and read their passkeys.
     // We are running as root (the daemon), so we have permission to read it.
-    let home_dir = get_user_home(&req.username)
+    let user_info = get_user_info(&req.username)
         .map_err(|_| anyhow::anyhow!("User {} not found on system", req.username))?;
-        
-    let cred_path = CredentialStore::path_for_user(&home_dir);
+
+    let cred_path = CredentialStore::path_for_user(&user_info.home_dir);
     let store = CredentialStore::load(&cred_path)?;
 
     if !store.has_passkeys() {
@@ -254,10 +252,9 @@ async fn authenticate_finish(
         .finish_passkey_authentication(&req.credential, &auth_state)
         .map_err(|e| anyhow::anyhow!("Authentication verification failed: {e}"))?;
 
-    // Note: For this standalone test page, we INTENTIONALLY DO NOT save the updated 
-    // passkey signature counter back to disk. If the root daemon overwrote the file,
-    // it would change the file ownership to root:root, locking the user out.
-    // The real PAM module (Phase 3) will handle credential updates safely.
+    // Note: For this standalone test page, we INTENTIONALLY DO NOT save the updated
+    // passkey signature counter back to disk.
+    // The real PAM module handles credential updates safely.
 
     tracing::info!("Authentication successful (test mode, counter not updated)");
 
@@ -288,5 +285,101 @@ impl IntoResponse for AppError {
 impl From<anyhow::Error> for AppError {
     fn from(err: anyhow::Error) -> Self {
         AppError(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::webauthn::create_webauthn;
+    use chrono::{Duration, Utc};
+    use std::path::PathBuf;
+    use tokio::sync::oneshot;
+
+    async fn setup_test_state() -> Arc<AppState> {
+        let mut config = Config::default();
+        config.relying_party.origins = vec!["http://localhost".to_string()];
+        let webauthn = create_webauthn(&config).unwrap();
+        Arc::new(AppState {
+            webauthn,
+            config,
+            enrollment_sessions: Mutex::new(HashMap::new()),
+            reg_challenges: Mutex::new(HashMap::new()),
+            auth_challenges: Mutex::new(HashMap::new()),
+            credential_store_path: PathBuf::from("/tmp/paski-test-creds"),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_enrollment_expiration_in_start() {
+        let state = setup_test_state().await;
+        let session_token = "test-token".to_string();
+        let (tx, _rx) = oneshot::channel();
+
+        // Insert an expired session (6 minutes ago)
+        state.enrollment_sessions.lock().await.insert(
+            session_token.clone(),
+            EnrollmentSession {
+                username: "testuser".to_string(),
+                completion_tx: Some(tx),
+                created_at: Utc::now() - Duration::minutes(6),
+            },
+        );
+
+        // Call register_start
+        let req = RegisterStartRequest {
+            session_token: session_token.clone(),
+        };
+        let result = register_start(State(state.clone()), Json(req)).await;
+
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().0.to_string();
+        assert!(err_msg.contains("expired"));
+
+        // Verify session was removed
+        assert!(state
+            .enrollment_sessions
+            .lock()
+            .await
+            .get(&session_token)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enrollment_stays_if_not_expired() {
+        let state = setup_test_state().await;
+        let session_token = "test-token".to_string();
+        let (tx, _rx) = oneshot::channel();
+
+        // Insert a fresh session
+        state.enrollment_sessions.lock().await.insert(
+            session_token.clone(),
+            EnrollmentSession {
+                username: "testuser".to_string(),
+                completion_tx: Some(tx),
+                created_at: Utc::now(),
+            },
+        );
+
+        // Call register_start
+        let req = RegisterStartRequest {
+            session_token: session_token.clone(),
+        };
+        let result = register_start(State(state.clone()), Json(req)).await;
+
+        // It might still be an Err if WebAuthn fails (e.g. challenge creation),
+        // but it should NOT be an "expired" error.
+        if let Err(e) = result {
+            let err_msg = e.0.to_string();
+            assert!(!err_msg.contains("expired"));
+        }
+
+        // Verify session still exists
+        assert!(state
+            .enrollment_sessions
+            .lock()
+            .await
+            .get(&session_token)
+            .is_some());
     }
 }

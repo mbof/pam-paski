@@ -179,11 +179,13 @@
                 showStatus('info', 'Verifying with server…');
 
                 // Step 3: Send the credential to the server to finish registration
+                const passkeyName = document.getElementById('passkey-name').value.trim() || 'My passkey';
                 const finishResp = await fetch('/api/register/finish', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_token: token,
+                        name: passkeyName,
                         credential: serializeCredential(credential),
                     }),
                 });

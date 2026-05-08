@@ -30,6 +30,8 @@ pub fn create_webauthn(config: &Config) -> Result<Arc<Webauthn>> {
         }
     }
 
-    let webauthn = builder.build().context("Failed to build Webauthn instance")?;
+    let webauthn = builder
+        .build()
+        .context("Failed to build Webauthn instance")?;
     Ok(Arc::new(webauthn))
 }
